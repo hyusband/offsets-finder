@@ -1,223 +1,217 @@
-use colored::*;
-use regex::Regex;
+mod config;
+mod exporter;
+mod models;
+mod scanner;
+mod ui;
+
+use clap::{Parser, Subcommand};
+use config::{detect_game_variant, get_game_config};
+use exporter::export_results;
+use models::{ExportFormat, GameVariant};
 use rfd::FileDialog;
-use std::fs;
-use std::io::{self, Write};
+use scanner::scan_file;
+use std::path::PathBuf;
+use ui::{
+    get_export_selection, get_game_selection, print_error, print_export_menu, print_game_menu,
+    print_header, print_info, print_results, print_statistics, print_success, wait_for_enter,
+};
 
-#[derive(Debug, Clone)]
-enum Target {
-    Fixed(String, String),
-    Pattern(String, String),
-    Separator,
+#[derive(Parser)]
+#[command(name = "Free Fire Offsets Finder")]
+#[command(about = "Extract memory offsets from Free Fire dump files", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-impl Target {
-    fn new_fixed(name: &str, hex: &str) -> Self {
-        Target::Fixed(name.to_string(), hex.to_string())
-    }
-
-    fn new_pattern(name: &str, pattern: &str) -> Self {
-        Target::Pattern(name.to_string(), pattern.to_string())
-    }
-}
-
-fn get_targets() -> Vec<Target> {
-    vec![
-        Target::new_fixed("StaticClass", "0x5C"),
-        Target::new_fixed("MatchStatus", "0x3C"),
-        Target::new_fixed("LocalPlayer", "0x7C"),
-        Target::new_fixed("DictionaryEntities", "0x68"),
-        Target::Separator,
+#[derive(Subcommand)]
+enum Commands {
+    Interactive,
+    Scan {
+        #[arg(short, long)]
+        file: PathBuf,
         
-        Target::new_fixed("Player_IsDead", "0x4C"),
-        Target::new_pattern("Player_Name", "protected string OIAJCBLDHKP;"),
-        Target::new_pattern("Player_ShadowBase", "public PlayerNetwork.HHCBNAPCKHF m_ShadowState;"),
-        Target::new_fixed("XPose", "0x78"),
-        Target::new_pattern("AvatarManager", "protected AvatarManager FOGJNGDMJKJ;"),
-        Target::new_fixed("Avatar", "0x94"),
-        Target::new_fixed("Avatar_IsVisible", "0x7C"),
-        Target::new_fixed("Avatar_Data", "0x10"),
-        Target::new_fixed("Avatar_Data_IsTeam", "0x51"),
-        Target::new_fixed("CurrentMatch", "0x50"),
-        Target::Separator,
+        #[arg(short, long)]
+        game: Option<String>,
         
-        Target::new_pattern("FollowCamera", "protected FollowCamera CHDOHNOEBML;"),
-        Target::new_fixed("Camera", "0x14"),
-        Target::new_pattern("AimRotation", "private Quaternion <KCFEHMAIIINO>k__BackingField;"),
-        Target::new_pattern("MainCameraTransform", "public Transform MainCameraTransform;"),
-        Target::Separator,
+        #[arg(short, long)]
+        export: Option<String>,
         
-        Target::new_pattern("Weapon", "public GPBDEDFKJNA ActiveUISightingWeapon;"),
-        Target::new_fixed("WeaponData", "0x58"),
-        Target::new_fixed("WeaponRecoil", "0xC"),
-        Target::new_fixed("ViewMatrix", "0x98 + 0x24"),
-        Target::Separator,
-        
-        Target::new_pattern("Silent1", "private bool <LPEIEILIKGC>k__BackingField;"),
-        Target::new_pattern("Silent2", "private MADMMIICBNN GEGFCFDGGGP;"),
-        Target::new_fixed("Silent3", "0x38"),
-        Target::new_fixed("Silent4", "0x2C"),
-        Target::Separator,
-        
-        Target::new_pattern("HeadCollider", "protected Collider HECFNHJKOMN;"),
-        Target::Separator,
-        
-        Target::new_pattern("PlayerAttributes", "protected PlayerAttributes JKPFFNEMJIF;"),
-        Target::new_fixed("NoReload", "0x91"),
-        Target::Separator,
-        
-        Target::new_pattern("isBot", "public bool IsClientBot;"),
-        Target::Separator,
-        
-        Target::new_pattern("Head", "protected ITransformNode OLCJOGDHJJJ;"),
-        Target::new_pattern("Root", "protected ITransformNode MPJBGDJJJMJ;"),
-        Target::new_pattern("LeftWrist", "protected ITransformNode GCMICMFEAKI;"),
-        Target::new_pattern("Spine", "protected ITransformNode HCLMADAFLPD;"),
-        Target::new_pattern("Hip", "protected ITransformNode CENAIGAFGAG;"),
-        Target::new_pattern("RightCalf", "protected ITransformNode JPBJIMCDBHN;"),
-        Target::new_pattern("LeftCalf", "protected ITransformNode BMGCHFGEDDA;"),
-        Target::new_pattern("RightFoot", "protected ITransformNode AGHJLIMNPJA;"),
-        Target::new_pattern("LeftFoot", "protected ITransformNode FDMBKCKMODA;"),
-        Target::new_pattern("RightWrist", "protected ITransformNode CKABHDJDMAP;"),
-        Target::new_pattern("LeftHand", "protected ITransformNode KOCDBPLKMBI;"),
-        Target::new_pattern("LeftShoulder", "protected ITransformNode LIBEIIIAGIK;"),
-        Target::new_pattern("RightShoulder", "protected ITransformNode HDEPJIBNIIK;"),
-        Target::new_pattern("RightWristJoint", "protected ITransformNode NJDDAPKPILB;"),
-        Target::new_pattern("LeftWristJoint", "protected ITransformNode JHIBMHEMJOL;"),
-        Target::new_pattern("LeftElbow", "protected ITransformNode JBACCHNMGNJ;"),
-        Target::new_pattern("RightElbow", "protected ITransformNode FGECMMJKFNC;"),
-    ]
-}
-
-fn extract_hex(line: &str) -> Option<String> {
-    let re = Regex::new(r"0x[0-9A-Fa-f]+").ok()?;
-    re.find(line).map(|m| m.as_str().to_string())
-}
-
-fn search_offsets(file_path: &str, targets: &[Target]) -> Vec<(String, Option<String>)> {
-    let mut results = Vec::new();
-    
-    let content = match fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}", format!("Error reading file: {}", e).red().bold());
-            return results;
-        }
-    };
-    
-    let lines: Vec<&str> = content.lines().collect();
-    
-    for target in targets {
-        match target {
-            Target::Fixed(name, hex) => {
-                results.push((name.clone(), Some(hex.clone())));
-            }
-            Target::Pattern(name, pattern) => {
-                let mut found = None;
-                for line in &lines {
-                    if line.contains(pattern) {
-                        if let Some(offset) = extract_hex(line) {
-                            found = Some(offset);
-                            break;
-                        }
-                    }
-                }
-                results.push((name.clone(), found));
-            }
-            Target::Separator => {
-                results.push((String::new(), None));
-            }
-        }
-    }
-    
-    results
-}
-
-fn print_results(results: &[(String, Option<String>)]) {
-    println!("\n{}", "====== OFFSETS ======".bright_cyan().bold());
-    
-    for (name, offset) in results {
-        if name.is_empty() {
-            println!();
-            continue;
-        }
-        
-        match offset {
-            Some(hex) => {
-                println!("{} {}", 
-                    name.bright_green().bold(), 
-                    hex.bright_yellow()
-                );
-            }
-            None => {
-                println!("{} {}", 
-                    name.bright_red().bold(), 
-                    "NOT FOUND".red()
-                );
-            }
-        }
-    }
-}
-
-fn set_console_title(_title: &str) {
-    // Console title functionality removed to avoid Windows API complexity
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
-    set_console_title("FEATURED OFFSETS FINDER - RUST EDITION");
-    
-    println!("{}", "╔═══════════════════════════════════════════╗".bright_cyan());
-    println!("{}", "║   OFFSETS FINDER - RUST EDITION v1.0    ║".bright_cyan().bold());
-    println!("{}", "╚═══════════════════════════════════════════╝".bright_cyan());
-    println!();
-    
-    let file_path = FileDialog::new()
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Interactive) | None => run_interactive_mode(),
+        Some(Commands::Scan {
+            file,
+            game,
+            export,
+            output,
+        }) => run_cli_mode(file, game, export, output),
+    }
+}
+
+fn run_interactive_mode() {
+    print_header();
+
+    print_info("Select a dump.cs file...");
+    let file_path = match FileDialog::new()
         .add_filter("C# Dump", &["cs"])
         .set_title("Select dump.cs file")
-        .pick_file();
-    
-    let file_path = match file_path {
+        .pick_file()
+    {
         Some(path) => path,
         None => {
-            eprintln!("{}", "No file selected. Exiting...".red().bold());
+            print_error("No file selected. Exiting...");
             wait_for_enter();
             return;
         }
     };
-    
-    println!("{} {}", 
-        "Selected file:".bright_blue().bold(), 
-        file_path.display().to_string().bright_white()
-    );
-    
-    let targets = get_targets();
-    println!("{}", "\nSearching for offsets...".bright_blue().bold());
-    
-    let results = search_offsets(file_path.to_str().unwrap(), &targets);
-    
-    print_results(&results);
-    
-    let found_count = results.iter()
-        .filter(|(name, offset)| !name.is_empty() && offset.is_some())
-        .count();
-    let total_count = results.iter()
-        .filter(|(name, _)| !name.is_empty())
-        .count();
-    
-    println!("\n{}", "═══════════════════════════════════════════".bright_cyan());
-    println!("{} {}/{}", 
-        "Found:".bright_green().bold(),
-        found_count.to_string().bright_yellow().bold(),
-        total_count.to_string().bright_white()
-    );
-    println!("{}", "═══════════════════════════════════════════".bright_cyan());
-    
+
+    print_success(&format!("Selected: {}", file_path.display()));
+
+    print_game_menu();
+    let game_variant = match get_game_selection() {
+        Some(1) => GameVariant::FreeFire,
+        Some(2) => GameVariant::FreeFireMax,
+        Some(3) => GameVariant::FreeFireTela,
+        Some(4) => {
+            print_info("Auto-detecting game variant...");
+            match std::fs::read_to_string(&file_path) {
+                Ok(content) => match detect_game_variant(&content) {
+                    Some(variant) => {
+                        print_success(&format!("Detected: {}", variant.name()));
+                        variant
+                    }
+                    None => {
+                        print_error("Could not detect game variant. Using Free Fire standard.");
+                        GameVariant::FreeFire
+                    }
+                },
+                Err(_) => {
+                    print_error("Error reading file. Using Free Fire standard.");
+                    GameVariant::FreeFire
+                }
+            }
+        }
+        _ => {
+            print_error("Invalid selection. Using Free Fire standard.");
+            GameVariant::FreeFire
+        }
+    };
+
+    print_info(&format!("Scanning for {} offsets...", game_variant.name()));
+
+    let config = get_game_config(game_variant);
+    let results = match scan_file(file_path.to_str().unwrap(), &config) {
+        Ok(results) => results,
+        Err(e) => {
+            print_error(&format!("Scan failed: {}", e));
+            wait_for_enter();
+            return;
+        }
+    };
+
+    print_results(&results, game_variant);
+    print_statistics(&results);
+
+    print_export_menu();
+    if let Some(choice) = get_export_selection() {
+        let (format, extension) = match choice {
+            1 => (ExportFormat::Json, "json"),
+            2 => (ExportFormat::CppHeader, "hpp"),
+            3 => (ExportFormat::RustModule, "rs"),
+            4 => (ExportFormat::PlainText, "txt"),
+            5 => {
+                print_info("Skipping export.");
+                wait_for_enter();
+                return;
+            }
+            _ => {
+                print_error("Invalid selection. Skipping export.");
+                wait_for_enter();
+                return;
+            }
+        };
+
+        let output_path = FileDialog::new()
+            .set_file_name(&format!("offsets.{}", extension))
+            .add_filter("Export file", &[extension])
+            .save_file();
+
+        if let Some(path) = output_path {
+            match export_results(&results, game_variant, format, path.to_str().unwrap()) {
+                Ok(_) => print_success(&format!("Exported to: {}", path.display())),
+                Err(e) => print_error(&format!("Export failed: {}", e)),
+            }
+        } else {
+            print_info("Export cancelled.");
+        }
+    }
+
     wait_for_enter();
 }
 
-fn wait_for_enter() {
-    print!("\n{}", "Press Enter to exit...".bright_blue());
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
+fn run_cli_mode(
+    file: PathBuf,
+    game: Option<String>,
+    export_format: Option<String>,
+    output: Option<PathBuf>,
+) {
+    let game_variant = match game.as_deref() {
+        Some("freefire") | Some("ff") => GameVariant::FreeFire,
+        Some("max") => GameVariant::FreeFireMax,
+        Some("tela") => GameVariant::FreeFireTela,
+        Some("auto") | None => {
+            match std::fs::read_to_string(&file) {
+                Ok(content) => detect_game_variant(&content).unwrap_or(GameVariant::FreeFire),
+                Err(_) => GameVariant::FreeFire,
+            }
+        }
+        _ => {
+            eprintln!("Invalid game variant. Using Free Fire standard.");
+            GameVariant::FreeFire
+        }
+    };
+
+    println!("Scanning {} for {} offsets...", file.display(), game_variant.name());
+
+    let config = get_game_config(game_variant);
+    let results = match scan_file(file.to_str().unwrap(), &config) {
+        Ok(results) => results,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    print_results(&results, game_variant);
+    print_statistics(&results);
+
+    if let Some(format_str) = export_format {
+        let format = match format_str.as_str() {
+            "json" => ExportFormat::Json,
+            "cpp" => ExportFormat::CppHeader,
+            "rust" => ExportFormat::RustModule,
+            "txt" => ExportFormat::PlainText,
+            _ => {
+                eprintln!("Invalid export format. Skipping export.");
+                return;
+            }
+        };
+
+        let output_path = output.unwrap_or_else(|| {
+            PathBuf::from(format!("offsets.{}", format.extension()))
+        });
+
+        match export_results(&results, game_variant, format, output_path.to_str().unwrap()) {
+            Ok(_) => println!("Exported to: {}", output_path.display()),
+            Err(e) => eprintln!("Export failed: {}", e),
+        }
+    }
 }

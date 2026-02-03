@@ -7,6 +7,11 @@ edition = "2021"
 regex = "1.10"
 rfd = "0.14"
 colored = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+toml = "0.8"
+chrono = "0.4"
 
 [profile.release]
 opt-level = "z"
