@@ -1,4 +1,5 @@
 mod config;
+mod dumper;
 mod exporter;
 mod models;
 mod scanner;
@@ -6,6 +7,7 @@ mod ui;
 
 use clap::{Parser, Subcommand};
 use config::{detect_game_variant, get_game_config};
+use dumper::dump_bluestacks_memory;
 use exporter::export_results;
 use models::{ExportFormat, GameVariant};
 use rfd::FileDialog;
@@ -40,6 +42,10 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    Dump {
+        #[arg(short, long, default_value = "memory_dump.bin")]
+        output: String,
+    },
 }
 
 fn main() {
@@ -53,6 +59,15 @@ fn main() {
             export,
             output,
         }) => run_cli_mode(file, game, export, output),
+        Some(Commands::Dump { output }) => {
+            print_header();
+            print_info(&format!("Attempting to dump BlueStacks memory to {}...", output));
+            match dump_bluestacks_memory(&output) {
+                Ok(_) => print_success(&format!("Memory dumped successfully to {}", output)),
+                Err(e) => print_error(&format!("Dump failed: {}", e)),
+            }
+            wait_for_enter();
+        }
     }
 }
 

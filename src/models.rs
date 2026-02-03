@@ -21,6 +21,8 @@ impl GameVariant {
 pub enum Target {
     Fixed { name: String, hex: String },
     Pattern { name: String, pattern: String },
+    Regex { name: String, pattern: String },
+    AoB { name: String, signature: String },
     Separator,
 }
 
@@ -39,11 +41,27 @@ impl Target {
         }
     }
 
+    pub fn new_regex(name: &str, pattern: &str) -> Self {
+        Target::Regex {
+            name: name.to_string(),
+            pattern: pattern.to_string(),
+        }
+    }
+
+    pub fn new_aob(name: &str, signature: &str) -> Self {
+        Target::AoB {
+            name: name.to_string(),
+            signature: signature.to_string(),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn name(&self) -> Option<&str> {
         match self {
             Target::Fixed { name, .. } => Some(name),
             Target::Pattern { name, .. } => Some(name),
+            Target::Regex { name, .. } => Some(name),
+            Target::AoB { name, .. } => Some(name),
             Target::Separator => None,
         }
     }
