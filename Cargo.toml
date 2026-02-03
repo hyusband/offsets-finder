@@ -1,0 +1,15 @@
+[package]
+name = "offsets-finder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1.10"
+rfd = "0.14"
+colored = "2.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
